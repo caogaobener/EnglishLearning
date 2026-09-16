@@ -8,9 +8,6 @@ const audioElement = ref<HTMLAudioElement>()
 const isPlaying = ref(false)
 const currentTime = ref(0)
 const duration = ref(0)
-const playbackRate = ref(1)
-const playbackRates = [0.75, 1, 1.25, 1.5, 2]
-
 const hasAudio = computed(() => Boolean(props.src))
 
 async function togglePlayback() {
@@ -54,14 +51,6 @@ function skip(seconds: number) {
   currentTime.value = audio.currentTime
 }
 
-function changePlaybackRate(event: Event) {
-  const target = event.currentTarget as HTMLSelectElement
-  const rate = Number(target.value)
-
-  playbackRate.value = rate
-  if (audioElement.value) audioElement.value.playbackRate = rate
-}
-
 function formatTime(seconds: number) {
   if (!Number.isFinite(seconds)) return '00:00'
 
@@ -73,10 +62,7 @@ function formatTime(seconds: number) {
 
 <template>
   <div class="audio-player" aria-label="音频播放器">
-    <div class="audio-heading">
-      <span class="audio-label">音频材料</span>
-      <strong>{{ label }}</strong>
-    </div>
+    <p class="audio-label">音频材料 · {{ label }}</p>
 
     <audio
       ref="audioElement"
@@ -137,19 +123,6 @@ function formatTime(seconds: number) {
         <RotateCw :size="17" />
         <span>10</span>
       </button>
-      <label class="audio-rate">
-        <span>倍速</span>
-        <select
-          :value="playbackRate"
-          :disabled="!hasAudio"
-          aria-label="播放速度"
-          @change="changePlaybackRate"
-        >
-          <option v-for="rate in playbackRates" :key="rate" :value="rate">
-            {{ rate }}×
-          </option>
-        </select>
-      </label>
     </div>
 
     <p v-if="!hasAudio" class="audio-placeholder">等待导入音频</p>
