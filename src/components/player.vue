@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Pause, Play, RotateCcw, RotateCw } from 'lucide-vue-next'
+import { Pause, Play } from 'lucide-vue-next'
 
 const props = defineProps<{ label: string; src: string }>()
 
@@ -73,11 +73,6 @@ function formatTime(seconds: number) {
 
 <template>
   <div class="audio-player" aria-label="音频播放器">
-    <div class="audio-heading">
-      <span class="audio-label">音频材料</span>
-      <strong>{{ label }}</strong>
-    </div>
-
     <audio
       ref="audioElement"
       :src="src || undefined"
@@ -90,24 +85,6 @@ function formatTime(seconds: number) {
       @ended="isPlaying = false"
     ></audio>
 
-    <div class="audio-timeline">
-      <input
-        class="audio-progress"
-        type="range"
-        min="0"
-        :max="duration || 0"
-        step="0.1"
-        :value="currentTime"
-        :disabled="!hasAudio || duration === 0"
-        aria-label="音频进度"
-        @input="seek"
-      />
-      <div class="audio-time">
-        <span>{{ formatTime(currentTime) }}</span>
-        <span>{{ formatTime(duration) }}</span>
-      </div>
-    </div>
-
     <div class="audio-controls">
       <button
         type="button"
@@ -115,8 +92,7 @@ function formatTime(seconds: number) {
         aria-label="后退 10 秒"
         @click="skip(-10)"
       >
-        <RotateCcw :size="17" />
-        <span>10</span>
+        -10
       </button>
       <button
         class="audio-play-button"
@@ -134,11 +110,9 @@ function formatTime(seconds: number) {
         aria-label="前进 10 秒"
         @click="skip(10)"
       >
-        <RotateCw :size="17" />
-        <span>10</span>
+        +10
       </button>
       <label class="audio-rate">
-        <span>倍速</span>
         <select
           :value="playbackRate"
           :disabled="!hasAudio"
@@ -150,6 +124,24 @@ function formatTime(seconds: number) {
           </option>
         </select>
       </label>
+    </div>
+
+    <div class="audio-timeline">
+      <input
+        class="audio-progress"
+        type="range"
+        min="0"
+        :max="duration || 0"
+        step="0.1"
+        :value="currentTime"
+        :disabled="!hasAudio || duration === 0"
+        aria-label="音频进度"
+        @input="seek"
+      />
+      <div class="audio-time">
+        <span>{{ formatTime(currentTime) }}</span>
+        <span>{{ formatTime(duration) }}</span>
+      </div>
     </div>
 
     <p v-if="!hasAudio" class="audio-placeholder">等待导入音频</p>

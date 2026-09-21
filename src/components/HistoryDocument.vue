@@ -2,7 +2,10 @@
 import { storeToRefs } from 'pinia'
 import { BookOpen, Clock3, FileText } from 'lucide-vue-next'
 import { useDocumentStore } from '../stores/document'
+import MediaImport from './MediaImport.vue'
+import type { UploadedDocument } from '../types/upload'
 
+const emit = defineEmits<{ 'transcription-complete': [document: UploadedDocument] }>()
 const documentStore = useDocumentStore()
 const { documents, selectedDocumentId } = storeToRefs(documentStore)
 </script>
@@ -16,6 +19,7 @@ const { documents, selectedDocumentId } = storeToRefs(documentStore)
       </div>
       <span class="panel-count">{{ documents.length }}</span>
     </div>
+    <MediaImport @transcription-complete="emit('transcription-complete', $event)" />
     <button
       v-for="document in documents"
       :key="document.id"
