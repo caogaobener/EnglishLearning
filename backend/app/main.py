@@ -1,28 +1,16 @@
-from __future__ import annotations
-
-import shutil
-import subprocess
-import tempfile
+import os
+import re
 import uuid
-from pathlib import Path
-from typing import Literal
-
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+import asyncio
+import httpx
+from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from bilibili_api import video, Credential
 
-# 任务的唯一状态
-TaskStatus = Literal["uploaded", "processing", "transcribing", "completed", "failed"]
+app = FastAPI(title="English Learning B站解析 API")
 
-# 限制文件大小时长以及种类
-MAX_FILE_SIZE = 500 * 1024 * 1024
-MAX_DURATION_SECONDS = 2 * 60 * 60
-ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".mp4", ".mov"}
-
-# 任务状态字典，存储每个上传任务的状态和结果
-tasks: dict[str, dict[str, str | None]] = {}
-
-app = FastAPI(title="English Learning Upload API")
-# 跨域请求
+# 1. 配置跨域（允许前端 5173 端口访问）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -30,146 +18,109 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 不同任务状态更新函数
-def update_task(task_id: str, status: TaskStatus, **values: str | None) -> None:
-    tasks[task_id] = {**tasks[task_id], "status": status, **values}
+# 2. 安全读取 Cookie（优先从环境变量读，读不到就用默认值本地测试）
+credential = Credential(
+    sessdata="36a32716%2C1807082886%2Cea5b6%2Aa2CjDDkewGSGfT0VUZ4DjVT21Q2JpI9tuSHH9ouLCZgQqpxcY-OyVtsYmGARNImy99Sl4SVkhVUC01dWVGSHduUE5SUHZqWHRBazRxY3M1OFVIUF9RVWQ2N00tcTU3NUp6YjVsMFNVSDVMWjRCQTA0Mlp2UHB2UV9teXVtbGhCU3JDdzREZDJQVFhnIIEC",
+    bili_jct="ac6514d1076a6db4f4dbb02e9c412fcb"
+)
 
-# 终端命令执行函数，用于调用 FFmpeg 处理音频
-def run_command(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+# 3. 内存任务字典（生产环境建议用 Redis）
+tasks = {}
+
+# 4. 定义前端传来的请求体
+class ParseRequest(BaseModel):
+    url: str  # 用户粘贴的B站链接或BV号
+
+# 5. 工具函数：从各种B站链接中提取 BV 号
+def extract_bvid(url_or_bvid: str) -> str:
+    if url_or_bvid.startswith("BV"):
+        return url_or_bvid
+    # 正则匹配BV号（BV后面跟10位字母或数字）
+    match = re.search(r'(BV[a-zA-Z0-9]{10})', url_or_bvid)
+    if match:
+        return match.group(1)#获取第一个匹配的BV号
+    raise ValueError("无效的B站链接或BV号")
+
+# 6. 核心后台任务（耗时操作全部在这里，不会阻塞前端请求）
+async def process_bili_task(task_id: str, bvid: str):
+    # 初始化任务状态为处理中
+    tasks[task_id] = {"status": "processing", "text": None, "error": None}
+    
     try:
-        return subprocess.run(
-            command,
-            # 命令失效抛出calledProcessError异常
-            check=True,
-            # 捕获命令输出
-            capture_output=True,
-            # 只把输出作为文本返回，而不是字节
-            text=True,
-            timeout=timeout,
-        )
-    # 统一异常处理，前端只需要捕获 RuntimeError 即可
-    except FileNotFoundError as exc:
-        raise RuntimeError("服务器未安装 FFmpeg，请先安装 ffmpeg 和 ffprobe") from exc
-    # 命令失效
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(exc.stderr.strip() or "FFmpeg 处理失败") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("媒体处理超时") from exc
-
-# 读取媒体时长
-def get_duration(input_path: Path) -> float:
-    result = run_command(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(input_path),
-        ],
-        timeout=30,
-    )
-    try:
-        return float(result.stdout.strip())
-    except ValueError as exc:
-        raise RuntimeError("无法读取媒体时长") from exc
-
-
-def transcribe(audio_path: Path) -> str:
-    # 不在初版绑定 Whisper 或云端服务，避免引入重量级依赖和密钥配置。
-    raise RuntimeError(
-        "转写服务尚未配置。当前已完成文件上传和 FFmpeg 音频提取流程。"
-    )
-
-# 处理上传文件的函数，提取音频并进行转写
-def process_upload(task_id: str, source_path: Path, work_dir: Path) -> None:
-    try:
-        update_task(task_id, "processing")
-        duration = get_duration(source_path)
-        if duration > MAX_DURATION_SECONDS:
-            raise RuntimeError("媒体时长不能超过 2 小时")
-
-        audio_path = work_dir / "audio.wav"
-        run_command(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(source_path),
-                "-vn",
-                "-acodec",
-                "pcm_s16le",
-                "-ar",
-                "16000",
-                "-ac",
-                "1",
-                str(audio_path),
-            ],
-            timeout=15 * 60,
-        )
-
-        update_task(task_id, "transcribing")
-        text = transcribe(audio_path)
-        update_task(task_id, "completed", text=text)
+        v = video.Video(bvid, credential=credential)
+        info = await v.get_info()
+        cid = info["cid"]
+        
+        # 获取字幕列表
+        subtitle_info = await v.get_subtitle(cid)
+        subtitles = subtitle_info.get("subtitles", [])
+        
+        # 🚨 降级策略入口：如果没有CC字幕
+        if not subtitles:
+            # 模拟耗时操作：实际项目中这里是去下载音频、调ASR API
+            # 这里的 await asyncio.sleep(3) 是为了让你测试前端轮询效果
+            print(f"⚠️ 视频 {bvid} 没有CC字幕，正在降级调 ASR...")
+            await asyncio.sleep(3) 
+            raise RuntimeError("该视频没有CC字幕，需要降级处理（ASR逻辑待接入）")
+        
+        # 提取字幕链接
+        subtitle_url = subtitles[0]["subtitle_url"]
+        if not subtitle_url.startswith("http"):
+            subtitle_url = "https:" + subtitle_url
+        
+        # 使用 httpx 异步下载字幕（避免阻塞事件循环）
+        async with httpx.AsyncClient() as client:
+            response = await client.get(subtitle_url)
+            subtitle_data = response.json()
+        
+        # 解析字幕数据
+        result = []
+        for item in subtitle_data.get("body", []):
+            result.append({
+                "start": item["from"],
+                "end": item["to"],
+                "text": item["content"]
+            })
+        
+        # 更新任务状态为完成，存入字幕和标题
+        tasks[task_id] = {
+            "status": "completed",
+            "text": result,
+            "title": info['title'],
+            "error": None
+        }
+        
     except Exception as exc:
-        update_task(task_id, "failed", error=str(exc))
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+        # 发生任何错误，更新为失败状态
+        tasks[task_id] = {"status": "failed", "text": None, "error": str(exc)}
 
-# 保存上传的文件
-async def save_upload(upload: UploadFile, destination: Path) -> int:
-    size = 0
-    with destination.open("wb") as output:
-        # 传一点数据就写入文件然后判断大小
-        while chunk := await upload.read(1024 * 1024):
-            size += len(chunk)
-            if size > MAX_FILE_SIZE:
-                # 文件过大，删除以前存的部分内存文件并抛出异常
-                destination.unlink(missing_ok=True)
-                raise HTTPException(status_code=413, detail="文件不能超过 500MB")
-            output.write(chunk)
-    return size
 
-# 文件上传接口
-# 202 Accepted 表示请求已接受处理，但尚未完成
-@app.post("/api/uploads", status_code=202)
-async def create_upload(
-    # 后台处理任务
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-) -> dict[str, str]:
-    extension = Path(file.filename or "").suffix.lower()
-    if extension not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=415, detail="仅支持 mp3、wav、m4a、mp4、mov 文件")
-    # 生成唯一任务 ID （随机数）
-    task_id = uuid.uuid4().hex
-    # 创建临时任务id文件夹
-    # prefix这个是定义了文件夹的前缀，mkdtemp是创建一个临时文件夹的函数
-    work_dir = Path(tempfile.mkdtemp(prefix=f"english-learning-{task_id}-"))
-    # 创建临时文件路径（在对应的临时文件夹中），保存上传的文件
-    source_path = work_dir / f"source{extension}"
-    tasks[task_id] = {
-        "status": "uploaded",
-        "filename": file.filename,
-        "text": None,
-        "error": None,
-    }
-
+# 7. 提交解析任务接口（前端发一次）
+@app.post("/api/parse", status_code=202)
+async def create_parse_task(req: ParseRequest, background_tasks: BackgroundTasks):
     try:
-        await save_upload(file, source_path)
-    except Exception:
-        shutil.rmtree(work_dir, ignore_errors=True)
-        raise
-
-    background_tasks.add_task(process_upload, task_id, source_path, work_dir)
+        bvid = extract_bvid(req.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    task_id = uuid.uuid4().hex
+    tasks[task_id] = {"status": "uploaded", "text": None, "error": None}
+    
+    # 核心：把耗时任务丢给后台，立即给前端返回 task_id
+    background_tasks.add_task(process_bili_task, task_id, bvid)
+    
     return {"task_id": task_id, "status": "uploaded"}
 
-# 查询上传任务状态接口
-@app.get("/api/uploads/{task_id}")
-async def get_upload_status(task_id: str) -> dict[str, str | None]:
+
+# 8. 前端轮询查询接口（前端每隔1秒调一次）
+@app.get("/api/parse/{task_id}")
+async def get_parse_status(task_id: str):
     task = tasks.get(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="上传任务不存在或已过期")
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
     return task
+
+# 9. 方便本地直接 python main.py 启动
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
